@@ -50,9 +50,6 @@ void can_init(FDCAN_HandleTypeDef *hcan, FDCAN_GlobalTypeDef *instance)
   else if(instance == FDCAN2) {
     MX_FDCAN2_Init();
   }
-  else if(instance == FDCAN3) {
-    MX_FDCAN3_Init();
-  }
   else {
     /* invalid channel */
   }
@@ -137,8 +134,9 @@ void can_enable(FDCAN_HandleTypeDef *hcan, bool loop_back, bool listen_only, boo
   HAL_FDCAN_Start(hcan);
 
   HAL_FDCAN_ActivateNotification(hcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE
-                                 | FDCAN_IT_LIST_BIT_LINE_ERROR
-                                 | FDCAN_IT_LIST_PROTOCOL_ERROR, 0);
+                                 | FDCAN_IT_ERROR_PASSIVE
+                                 | FDCAN_IT_ERROR_WARNING
+                                 | FDCAN_IT_BUS_OFF, 0);
 }
 
 void can_disable(FDCAN_HandleTypeDef *hcan)
@@ -146,8 +144,9 @@ void can_disable(FDCAN_HandleTypeDef *hcan)
   //Stop can using HAL
   HAL_FDCAN_Stop(hcan);
   HAL_FDCAN_DeactivateNotification(hcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE
-                                   | FDCAN_IT_LIST_BIT_LINE_ERROR
-                                   | FDCAN_IT_LIST_PROTOCOL_ERROR);
+                                   | FDCAN_IT_ERROR_PASSIVE
+                                   | FDCAN_IT_ERROR_WARNING
+                                   | FDCAN_IT_BUS_OFF);
 
 }
 
