@@ -67,7 +67,7 @@
 /* #define HAL_QSPI_MODULE_ENABLED   */
 /* #define HAL_RAMECC_MODULE_ENABLED   */
 /* #define HAL_RNG_MODULE_ENABLED   */
-/* #define HAL_RTC_MODULE_ENABLED   */
+#define HAL_RTC_MODULE_ENABLED
 /* #define HAL_SAI_MODULE_ENABLED   */
 /* #define HAL_SD_MODULE_ENABLED   */
 /* #define HAL_MMC_MODULE_ENABLED   */
@@ -75,7 +75,7 @@
 /* #define HAL_SPI_MODULE_ENABLED   */
 /* #define HAL_SWPMI_MODULE_ENABLED   */
 #define HAL_TIM_MODULE_ENABLED
-/* #define HAL_UART_MODULE_ENABLED   */
+#define HAL_UART_MODULE_ENABLED
 /* #define HAL_USART_MODULE_ENABLED   */
 /* #define HAL_IRDA_MODULE_ENABLED   */
 /* #define HAL_SMARTCARD_MODULE_ENABLED   */

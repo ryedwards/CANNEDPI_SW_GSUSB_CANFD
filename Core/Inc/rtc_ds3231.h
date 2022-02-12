@@ -2,8 +2,7 @@
 
 The MIT License (MIT)
 
-Copyright (c) 2016 Hubert Denkmair
-Copyright (c) 2022 Ryan Edwards (changes for STM32G4 and CAN-FD)
+Copyright (c) 2022 R. Edwards
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,31 +23,28 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 */
-
-/* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __CAN_H
-#define __CAN_H
+#ifndef __RTC_DS3231_H
+#define __RTC_DS3231_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include "main.h"
-#include <stdint.h>
-#include <stdbool.h>
-#include "gs_usb.h"
+
+/* Exported defines -----------------------------------------------------------*/
+#define RTC_DS3231_I2C_INSTANCE     I2C3
 
 /* Exported functions --------------------------------------------------------*/
-void can_init(FDCAN_HandleTypeDef *hcan, FDCAN_GlobalTypeDef *instance);
-void can_set_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t phase_seg1, uint8_t phase_seg2, uint8_t sjw);
-void can_set_data_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t phase_seg1, uint8_t phase_seg2, uint8_t sjw);
-void can_enable(FDCAN_HandleTypeDef *hcan, bool loop_back, bool listen_only, bool one_shot, bool can_mode_fd);
-void can_disable(FDCAN_HandleTypeDef *hcan);
-bool can_is_enabled(FDCAN_HandleTypeDef *hcan);
-bool can_send(FDCAN_HandleTypeDef *hcan, struct gs_host_frame *frame);
+void rtc_ds3231_init(I2C_HandleTypeDef *hi2c);
+void rtc_ds3231_listen_cplt_callback(I2C_HandleTypeDef *hi2c);
+void rtc_ds3231_addr_callback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode);
+void rtc_ds3231_slave_tx_cplt_callback(I2C_HandleTypeDef *hi2c);
+void rtc_ds3231_slave_rx_cplt_callback(I2C_HandleTypeDef *hi2c);
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __CAN_H */
+#endif /* __RTC_DS3231_H */

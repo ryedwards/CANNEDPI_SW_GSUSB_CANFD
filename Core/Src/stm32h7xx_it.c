@@ -41,7 +41,10 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
+extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan2;
 
+extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -55,7 +58,6 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN EV */
@@ -161,6 +163,32 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles FDCAN1 interrupt 0.
+  */
+void FDCAN1_IT0_IRQHandler(void)
+{
+  /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+  /* USER CODE END FDCAN1_IT0_IRQn 0 */
+  /* USER CODE BEGIN FDCAN1_IT0_IRQn 1 */
+
+  /* USER CODE END FDCAN1_IT0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles FDCAN2 interrupt 0.
+  */
+void FDCAN2_IT0_IRQHandler(void)
+{
+  /* USER CODE BEGIN FDCAN2_IT0_IRQn 0 */
+HAL_FDCAN_IRQHandler(&hfdcan2);
+  /* USER CODE END FDCAN2_IT0_IRQn 0 */
+  /* USER CODE BEGIN FDCAN2_IT0_IRQn 1 */
+
+  /* USER CODE END FDCAN2_IT0_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM1 update interrupt.
   */
 void TIM1_UP_IRQHandler(void)
@@ -180,9 +208,8 @@ void TIM1_UP_IRQHandler(void)
 void OTG_FS_IRQHandler(void)
 {
   /* USER CODE BEGIN OTG_FS_IRQn 0 */
-
-  /* USER CODE END OTG_FS_IRQn 0 */
   HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
+  /* USER CODE END OTG_FS_IRQn 0 */
   /* USER CODE BEGIN OTG_FS_IRQn 1 */
 
   /* USER CODE END OTG_FS_IRQn 1 */

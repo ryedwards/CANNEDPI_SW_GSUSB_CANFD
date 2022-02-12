@@ -57,8 +57,19 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define LED1_Pin GPIO_PIN_10
+#define LED1_GPIO_Port GPIOD
+#define LED2_Pin GPIO_PIN_11
+#define LED2_GPIO_Port GPIOD
+#define LED3_Pin GPIO_PIN_12
+#define LED3_GPIO_Port GPIOD
+#define FDCAN1_TERM_EN_Pin GPIO_PIN_13
+#define FDCAN1_TERM_EN_GPIO_Port GPIOD
+#define FDCAN2_TERM_EN_Pin GPIO_PIN_14
+#define FDCAN2_TERM_EN_GPIO_Port GPIOD
 void   MX_FDCAN1_Init(void);
 void   MX_FDCAN2_Init(void);
+void   MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

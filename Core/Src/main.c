@@ -18,11 +18,15 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "stream_buffer.h"
 #include "can.h"
+#include "led.h"
+#include "rtc_ds3231.h"
 #include "usbd_def.h"
 #include "usbd_desc.h"
 #include "usbd_core.h"
@@ -32,11 +36,21 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define IS_IRQ_MODE()             ( (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk) != 0)
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define TASK_MAIN_STACK_SIZE (2048 / sizeof(portSTACK_TYPE))
+#define TASK_MAIN_STACK_PRIORITY (tskIDLE_PRIORITY + 2)
+#define TASK_SERIAL_COMM_STACK_SIZE (128 / sizeof(portSTACK_TYPE))
+#define TASK_SERIAL_COMM_STACK_PRIORITY (tskIDLE_PRIORITY + 1)
+
+#define STREAM_BUFFER_UART1_OUT_SIZEBYTES     100U
+#define STREAM_BUFFER_UART1_OUT_TRIGGERLEVEL  10U
+#define STREAM_BUFFER_UART2_OUT_SIZEBYTES     100U
+#define STREAM_BUFFER_UART2_OUT_TRIGGERLEVEL  10U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,44 +60,49 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-FDCAN_HandleTypeDef hfdcan1;
-FDCAN_HandleTypeDef hfdcan2;
+I2C_HandleTypeDef hi2c3;
+
+RTC_HandleTypeDef hrtc;
 
 TIM_HandleTypeDef htim6;
 
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+
+/* USER CODE BEGIN PV */
+static TaskHandle_t xCreatedMainTask;
+static TaskHandle_t xCreatedSerialCommTask;
+
+static StreamBufferHandle_t stream_buffer_uart1_out;
+static StreamBufferHandle_t stream_buffer_uart2_out;
+
+QueueHandle_t queue_from_hostHandle;
+QueueHandle_t queue_to_hostHandle;
+
+FDCAN_HandleTypeDef hfdcan1;
+FDCAN_HandleTypeDef hfdcan2;
+
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 2048 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for queue_to_host */
-osMessageQueueId_t queue_to_hostHandle;
-const osMessageQueueAttr_t queue_to_host_attributes = {
-  .name = "queue_to_host"
-};
-/* Definitions for queue_from_host */
-osMessageQueueId_t queue_from_hostHandle;
-const osMessageQueueAttr_t queue_from_host_attributes = {
-  .name = "queue_from_host"
-};
-/* USER CODE BEGIN PV */
 USBD_HandleTypeDef hUSB;
+
+LED_HandleTypeDef hled1;
+LED_HandleTypeDef hled2;
+LED_HandleTypeDef hled3;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_TIM6_Init(void);
-void StartDefaultTask(void *argument);
-
+static void MX_I2C3_Init(void);
+static void MX_RTC_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void task_main(void *argument);
+static void task_serial_comm(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -120,60 +139,49 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM6_Init();
+  MX_I2C3_Init();
+  MX_RTC_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
   can_init(&hfdcan1, FDCAN1);
   can_init(&hfdcan2, FDCAN2);
 
+  led_init(&hled1, LED1_GPIO_Port, LED1_Pin, LED_MODE_INACTIVE, LED_ACTIVE_HIGH);
+  led_init(&hled2, LED2_GPIO_Port, LED2_Pin, LED_MODE_INACTIVE, LED_ACTIVE_HIGH);
+  led_init(&hled3, LED3_GPIO_Port, LED3_Pin, LED_MODE_INACTIVE, LED_ACTIVE_HIGH);
+
   USBD_Init(&hUSB, (USBD_DescriptorsTypeDef*)&FS_Desc, DEVICE_FS);
   USBD_RegisterClass(&hUSB, &USBD_GS_CAN);
-  USBD_GS_CAN_Init(&hUSB);//, q_frame_pool, q_from_host, &hLED);
+  USBD_GS_CAN_Init(&hUSB);
   USBD_GS_CAN_SetChannel(&hUSB, 0, &hfdcan1);
   USBD_GS_CAN_SetChannel(&hUSB, 1, &hfdcan2);
   USBD_Start(&hUSB);
-  /* USER CODE END 2 */
 
-  /* Init scheduler */
-  osKernelInitialize();
+  /* Initialize the DS3231 RTC emulator */
+  rtc_ds3231_init(&hi2c3);
 
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
+  /* Init the RTOS streams and queues */
+  queue_from_hostHandle = xQueueCreate(16, sizeof(struct gs_host_frame));
+  queue_to_hostHandle = xQueueCreate(16, sizeof(struct gs_host_frame));
 
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
+  stream_buffer_uart1_out = xStreamBufferCreate(STREAM_BUFFER_UART1_OUT_SIZEBYTES,
+                                                  STREAM_BUFFER_UART1_OUT_TRIGGERLEVEL);
+  stream_buffer_uart2_out = xStreamBufferCreate(STREAM_BUFFER_UART2_OUT_SIZEBYTES,
+                                                STREAM_BUFFER_UART2_OUT_TRIGGERLEVEL);
 
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* Create the queue(s) */
-  /* creation of queue_to_host */
-  queue_to_hostHandle = osMessageQueueNew (16, sizeof(struct gs_host_frame), &queue_to_host_attributes);
-
-  /* creation of queue_from_host */
-  queue_from_hostHandle = osMessageQueueNew (16, sizeof(struct gs_host_frame), &queue_from_host_attributes);
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
-  /* USER CODE END RTOS_EVENTS */
+  /* Init the RTOS tasks */
+  xTaskCreate(task_main, "Main Task", TASK_MAIN_STACK_SIZE, NULL,
+              TASK_MAIN_STACK_PRIORITY, &xCreatedMainTask);
+  xTaskCreate(task_serial_comm, "Serial Comm Task", TASK_SERIAL_COMM_STACK_SIZE, NULL,
+              TASK_SERIAL_COMM_STACK_PRIORITY, &xCreatedSerialCommTask);
 
   /* Start scheduler */
-  osKernelStart();
+  vTaskStartScheduler();
 
-  /* We should never get here as control is now taken by the scheduler */
+  /* USER CODE END 2 */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -205,9 +213,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
+                              |RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
@@ -243,108 +253,115 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief FDCAN1 Initialization Function
+  * @brief I2C3 Initialization Function
   * @param None
   * @retval None
   */
-void MX_FDCAN1_Init(void)
+static void MX_I2C3_Init(void)
 {
 
-  /* USER CODE BEGIN FDCAN1_Init 0 */
+  /* USER CODE BEGIN I2C3_Init 0 */
 
-  /* USER CODE END FDCAN1_Init 0 */
+  /* USER CODE END I2C3_Init 0 */
 
-  /* USER CODE BEGIN FDCAN1_Init 1 */
+  /* USER CODE BEGIN I2C3_Init 1 */
 
-  /* USER CODE END FDCAN1_Init 1 */
-  hfdcan1.Instance = FDCAN1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = DISABLE;
-  hfdcan1.Init.TransmitPause = DISABLE;
-  hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 1;
-  hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 2;
-  hfdcan1.Init.NominalTimeSeg2 = 2;
-  hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 1;
-  hfdcan1.Init.DataTimeSeg1 = 1;
-  hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.MessageRAMOffset = 0;
-  hfdcan1.Init.StdFiltersNbr = 0;
-  hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtsNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.RxFifo1ElmtsNbr = 0;
-  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.RxBuffersNbr = 0;
-  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.TxEventsNbr = 0;
-  hfdcan1.Init.TxBuffersNbr = 0;
-  hfdcan1.Init.TxFifoQueueElmtsNbr = 0;
-  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
-  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  /* USER CODE END I2C3_Init 1 */
+  hi2c3.Instance = I2C3;
+  hi2c3.Init.Timing = 0x307075B1;
+  hi2c3.Init.OwnAddress1 = 0;
+  hi2c3.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c3.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c3.Init.OwnAddress2 = 0;
+  hi2c3.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c3.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c3.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c3) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN FDCAN1_Init 2 */
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c3, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c3, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C3_Init 2 */
 
-  /* USER CODE END FDCAN1_Init 2 */
+  /* USER CODE END I2C3_Init 2 */
 
 }
 
 /**
-  * @brief FDCAN2 Initialization Function
+  * @brief RTC Initialization Function
   * @param None
   * @retval None
   */
-void MX_FDCAN2_Init(void)
+static void MX_RTC_Init(void)
 {
 
-  /* USER CODE BEGIN FDCAN2_Init 0 */
+  /* USER CODE BEGIN RTC_Init 0 */
 
-  /* USER CODE END FDCAN2_Init 0 */
+  /* USER CODE END RTC_Init 0 */
 
-  /* USER CODE BEGIN FDCAN2_Init 1 */
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
 
-  /* USER CODE END FDCAN2_Init 1 */
-  hfdcan2.Instance = FDCAN2;
-  hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-  hfdcan2.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan2.Init.AutoRetransmission = DISABLE;
-  hfdcan2.Init.TransmitPause = DISABLE;
-  hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 1;
-  hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 2;
-  hfdcan2.Init.NominalTimeSeg2 = 2;
-  hfdcan2.Init.DataPrescaler = 1;
-  hfdcan2.Init.DataSyncJumpWidth = 1;
-  hfdcan2.Init.DataTimeSeg1 = 1;
-  hfdcan2.Init.DataTimeSeg2 = 1;
-  hfdcan2.Init.MessageRAMOffset = 0;
-  hfdcan2.Init.StdFiltersNbr = 0;
-  hfdcan2.Init.ExtFiltersNbr = 0;
-  hfdcan2.Init.RxFifo0ElmtsNbr = 0;
-  hfdcan2.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.RxFifo1ElmtsNbr = 0;
-  hfdcan2.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.RxBuffersNbr = 0;
-  hfdcan2.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.TxEventsNbr = 0;
-  hfdcan2.Init.TxBuffersNbr = 0;
-  hfdcan2.Init.TxFifoQueueElmtsNbr = 0;
-  hfdcan2.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  hfdcan2.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
-  if (HAL_FDCAN_Init(&hfdcan2) != HAL_OK)
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN FDCAN2_Init 2 */
 
-  /* USER CODE END FDCAN2_Init 2 */
+  /* USER CODE BEGIN Check_RTC_BKUP */
+  /* Set Date and Time (if not already done before)*/
+  /* Read the Back Up Register 0 Data */
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR0) != 0x32F2)
+  {
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, 0x32F2);
+  }
+  /* USER CODE END RTC_Init 2 */
 
 }
 
@@ -387,38 +404,98 @@ static void MX_TIM6_Init(void)
 }
 
 /**
-  * @brief USB_OTG_FS Initialization Function
+  * @brief USART1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USB_OTG_FS_PCD_Init(void)
+static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END USB_OTG_FS_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hpcd_USB_OTG_FS.Init.dev_endpoints = 9;
-  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_FS.Init.dma_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.battery_charging_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END USB_OTG_FS_Init 2 */
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
 
 }
 
@@ -429,60 +506,161 @@ static void MX_USB_OTG_FS_PCD_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, LED1_Pin|LED2_Pin|LED3_Pin|FDCAN1_TERM_EN_Pin
+                          |FDCAN2_TERM_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : LED1_Pin LED2_Pin LED3_Pin FDCAN1_TERM_EN_Pin
+                           FDCAN2_TERM_EN_Pin */
+  GPIO_InitStruct.Pin = LED1_Pin|LED2_Pin|LED3_Pin|FDCAN1_TERM_EN_Pin
+                          |FDCAN2_TERM_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
 }
 
 /* USER CODE BEGIN 4 */
 
-/* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Function implementing the task_main thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+
+void task_main(void *argument)
 {
-  /* USER CODE BEGIN 5 */
+
   struct gs_host_frame frame;
 
   /* Infinite loop */
   for(;;)
   {
-    if (osMessageQueueGet(queue_from_hostHandle, &frame, 0, 0) == osOK){
+    if (xQueueReceive(queue_from_hostHandle, &frame, 0) == pdPASS){
       if (can_send(USBD_GS_CAN_GetChannelHandle(&hUSB,frame.channel), &frame)) {
         // Echo sent frame back to host
         frame.flags = 0x0;
         frame.reserved = 0x0;
-        osMessageQueuePut(queue_to_hostHandle, &frame, 0, 0);
+        xQueueSendToBack(queue_to_hostHandle, &frame, 0);
       }
       else {
         /* throw the message back onto the queue */
-        osMessageQueuePut(queue_from_hostHandle, &frame, 0, 0);
+        xQueueSendToFront(queue_from_hostHandle, &frame, 0);
       }
     }
 
-    if (osMessageQueueGet(queue_to_hostHandle, &frame, 0, 0) == osOK) {
-      if (USBD_GS_CAN_SendFrame(&hUSB, &frame) == USBD_OK) {
-        /* Good news - placeholder for doing something */
-      }
-      else {
+    if (xQueueReceive(queue_to_hostHandle, &frame, 0) == pdPASS) {
+      if (USBD_GS_CAN_SendFrame(&hUSB, &frame) != USBD_OK) {
         /* throw the message back onto the queue */
-        osMessageQueuePut(queue_to_hostHandle, &frame, 0, 0);
+        xQueueSendToFront(queue_to_hostHandle, &frame, 0);
       }
     }
 
-    osDelay(1);
+    led_update(&hled1);
+    led_update(&hled2);
+    led_update(&hled3);
+
+    vTaskDelay(1);
   }
-  /* USER CODE END 5 */
 }
+
+/**
+* @brief Function implementing the task_serial_comm thread.
+* @param argument: Not used
+* @retval None
+*/
+static void task_serial_comm(void *argument)
+{
+
+  /* Infinite loop */
+  for(;;)
+  {
+    size_t received_bytes;
+    uint8_t rx_data[1];
+
+#ifdef PI_UART_GATEWAY
+    /* handle UART gateway for passing STLink VCP <-> RPi UART */
+    if (HAL_UART_Receive(&huart1, rx_data, 1, 0) == HAL_OK) {
+      xStreamBufferSend(stream_buffer_uart2_out,rx_data, 1, 0);
+    }
+
+    if (HAL_UART_Receive(&huart2, rx_data, 1, 0) == HAL_OK) {
+      xStreamBufferSend(stream_buffer_uart1_out,rx_data, 1, 0);
+    }
+#endif
+
+    /* copy data from the stream buffer to the UART */
+    received_bytes = xStreamBufferReceive(stream_buffer_uart1_out, rx_data, sizeof(rx_data), 0);
+    if (received_bytes > 0) {
+      HAL_UART_Transmit(&huart1, rx_data, received_bytes, 0);
+    }
+
+    received_bytes = xStreamBufferReceive(stream_buffer_uart2_out, rx_data, sizeof(rx_data), 0);
+    if (received_bytes > 0) {
+      HAL_UART_Transmit(&huart2, rx_data, received_bytes, 0);
+    }
+
+    vTaskDelay(1);
+  }
+}
+
+/**
+  * @brief  Retargets the C library printf function to the USART.
+  * @param  None
+  * @retval None
+  */
+int __io_putchar(int ch)
+{
+  if (IS_IRQ_MODE()) {
+    xStreamBufferSendFromISR(stream_buffer_uart2_out,(uint8_t *)&ch, 1, NULL);
+  }
+  else {
+    xStreamBufferSend(stream_buffer_uart2_out,(uint8_t *)&ch, 1, 0);
+  }
+
+  return ch;
+}
+
+void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+
+  if (hi2c->Instance == RTC_DS3231_I2C_INSTANCE) {
+    rtc_ds3231_listen_cplt_callback(hi2c);
+  }
+}
+
+void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode)
+{
+  if (hi2c->Instance == RTC_DS3231_I2C_INSTANCE) {
+    rtc_ds3231_addr_callback(hi2c, TransferDirection, AddrMatchCode);
+  }
+}
+
+void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c->Instance == RTC_DS3231_I2C_INSTANCE) {
+    rtc_ds3231_slave_tx_cplt_callback(hi2c);
+  }
+}
+
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c->Instance == RTC_DS3231_I2C_INSTANCE) {
+    rtc_ds3231_slave_rx_cplt_callback(hi2c);
+  }
+}
+
+/* USER CODE END 4 */
 
 /**
   * @brief  Period elapsed callback in non blocking mode
@@ -513,6 +691,10 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  /* Turn on all the LEDs */
+  HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, GPIO_PIN_SET);
   __disable_irq();
   while (1)
   {
@@ -533,6 +715,7 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  Error_Handler();
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

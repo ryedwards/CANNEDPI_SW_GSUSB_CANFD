@@ -27,32 +27,74 @@ THE SOFTWARE.
 
 #include <string.h>
 #include "main.h"
-#include "cmsis_os.h"
+#include "FreeRTOS.h"
+#include "queue.h"
 #include "can.h"
+#include "led.h"
 #include "usbd_gs_can.h"
 
 static uint8_t can_rx_data_buff[64];
 static uint8_t can_tx_data_buff[64];
 
+extern LED_HandleTypeDef hled1;
+extern LED_HandleTypeDef hled2;
+extern LED_HandleTypeDef hled3;
+
 extern TIM_HandleTypeDef htim6;
-extern osMessageQueueId_t queue_to_hostHandle;
+extern QueueHandle_t queue_to_hostHandle;
 extern USBD_HandleTypeDef hUSB;
 
 static void can_parse_error_status(FDCAN_ProtocolStatusTypeDef *status, struct gs_host_frame *frame);
 
+/** @brief Function to initialize the FDCAN handle
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @param FDCAN_GlobalTypeDef *instance - pointer to the instance name.
+ *  @retval None
+ */
 void can_init(FDCAN_HandleTypeDef *hcan, FDCAN_GlobalTypeDef *instance)
 {
-  if (instance == FDCAN1) {
-    MX_FDCAN1_Init();
-  }
-  else if(instance == FDCAN2) {
-    MX_FDCAN2_Init();
-  }
-  else {
-    /* invalid channel */
-  }
+  hcan->Instance = instance;
+  hcan->Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hcan->Init.Mode = FDCAN_MODE_NORMAL;
+  hcan->Init.AutoRetransmission = DISABLE;
+  hcan->Init.TransmitPause = DISABLE;
+  hcan->Init.ProtocolException = DISABLE;
+  hcan->Init.NominalPrescaler = 1;
+  hcan->Init.NominalSyncJumpWidth = 1;
+  hcan->Init.NominalTimeSeg1 = 2;
+  hcan->Init.NominalTimeSeg2 = 2;
+  hcan->Init.DataPrescaler = 1;
+  hcan->Init.DataSyncJumpWidth = 1;
+  hcan->Init.DataTimeSeg1 = 1;
+  hcan->Init.DataTimeSeg2 = 1;
+  hcan->Init.MessageRAMOffset = 0;
+  hcan->Init.StdFiltersNbr = 0;
+  hcan->Init.ExtFiltersNbr = 0;
+  hcan->Init.RxFifo0ElmtsNbr = 0;
+  hcan->Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hcan->Init.RxFifo1ElmtsNbr = 0;
+  hcan->Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hcan->Init.RxBuffersNbr = 0;
+  hcan->Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hcan->Init.TxEventsNbr = 0;
+  hcan->Init.TxBuffersNbr = 0;
+  hcan->Init.TxFifoQueueElmtsNbr = 0;
+  hcan->Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hcan->Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+    if (HAL_FDCAN_Init(hcan) != HAL_OK)
+    {
+      Error_Handler();
+    }
 }
 
+/** @brief Function to set the CAN bit timing registers - will not set until can_enable() is executed
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @param uint16_t brp - The prescale value
+ *  @param uint16_t phase_seg1 - The time phase segment 1 value
+ *  @param uint16_t phase_seg2 - The time phase segment 2 value
+ *  @param uint8_t sjw - The sync jump width value
+ *  @retval None
+ */
 void can_set_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t phase_seg1, uint8_t phase_seg2, uint8_t sjw)
 {
   if ((brp > 0) && (brp <= 1024)
@@ -67,12 +109,20 @@ void can_set_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t phase_se
   }
 }
 
+/** @brief Function to set the CAN-FD (data) bit timing registers - will not set until can_enable() is executed
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @param uint16_t brp - The prescale value (data)
+ *  @param uint16_t phase_seg1 - The time phase segment 1 value (data)
+ *  @param uint16_t phase_seg2 - The time phase segment 2 value (data)
+ *  @param uint8_t sjw - The sync jump width value (data)
+ *  @retval None
+ */
 void can_set_data_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t phase_seg1, uint8_t phase_seg2, uint8_t sjw)
 {
   if ((brp > 0) && (brp <= 1024)
-    && (phase_seg1 > 0) && (phase_seg1 <= 16)
-    && (phase_seg2 > 0) && (phase_seg2 <= 8)
-    && (sjw > 0) && (sjw <= 4))
+      && (phase_seg1 > 0) && (phase_seg1 <= 16)
+      && (phase_seg2 > 0) && (phase_seg2 <= 8)
+      && (sjw > 0) && (sjw <= 4))
   {
     hcan->Init.DataPrescaler = brp;
     hcan->Init.DataTimeSeg1 = phase_seg1;
@@ -81,6 +131,14 @@ void can_set_data_bittiming(FDCAN_HandleTypeDef *hcan, uint16_t brp, uint8_t pha
   }
 }
 
+/** @brief Function to enable the CAN channel
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @param bool loop_back - flag to indicate CAN mode should be in loopback.
+ *  @param bool listen_only - flag to indicate CAN mode should be in monitor.
+ *  @param bool one_shot - flag to indicate CAN mode should be in one shot.
+ *  @param bool can_mode_fd - flag to indicate CAN supports CAN-FD.
+ *  @retval None
+ */
 void can_enable(FDCAN_HandleTypeDef *hcan, bool loop_back, bool listen_only, bool one_shot, bool can_mode_fd)
 {
   FDCAN_FilterTypeDef sFilterConfig;
@@ -139,19 +197,27 @@ void can_enable(FDCAN_HandleTypeDef *hcan, bool loop_back, bool listen_only, boo
   HAL_FDCAN_Start(hcan);
 
   HAL_FDCAN_ActivateNotification(hcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE
-                                 | FDCAN_IT_ERROR_PASSIVE
-                                 | FDCAN_IT_ERROR_WARNING
-                                 | FDCAN_IT_BUS_OFF, 0);
+                                   | FDCAN_IT_ERROR_PASSIVE
+                                   | FDCAN_IT_ERROR_WARNING
+                                   | FDCAN_IT_BUS_OFF, 0);
+
+  led_set_active(&hled3);
 }
 
+/** @brief Function to isable the CAN channel
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @retval None
+ */
 void can_disable(FDCAN_HandleTypeDef *hcan)
 {
   //Stop can using HAL
   HAL_FDCAN_Stop(hcan);
   HAL_FDCAN_DeactivateNotification(hcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE
-                                   | FDCAN_IT_ERROR_PASSIVE
-                                   | FDCAN_IT_ERROR_WARNING
-                                   | FDCAN_IT_BUS_OFF);
+                                     | FDCAN_IT_ERROR_PASSIVE
+                                     | FDCAN_IT_ERROR_WARNING
+                                     | FDCAN_IT_BUS_OFF);
+
+  led_set_inactive(&hled3);
 }
 
 bool can_is_enabled(FDCAN_HandleTypeDef *hcan)
@@ -164,6 +230,11 @@ bool can_is_enabled(FDCAN_HandleTypeDef *hcan)
   }
 }
 
+/** @brief Function to disable the CAN channel
+ *  @param FDCAN_HandleTypeDef *hcan - The pointer to the handle.
+ *  @param struct gs_host_frame *frame - The pointer to the host frame containing message data.
+ *  @retval true if TX was successful, false if no successful.
+ */
 bool can_send(FDCAN_HandleTypeDef *hcan, struct gs_host_frame *frame)
 {
   FDCAN_TxHeaderTypeDef TxHeader;
@@ -205,6 +276,9 @@ bool can_send(FDCAN_HandleTypeDef *hcan, struct gs_host_frame *frame)
     memcpy(can_tx_data_buff, frame->classic_can.data, 8);
   }
 
+  /* blink LED to indicate a CAN TX */
+  led_indicate_rxtx(&hled1);
+
   if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, &TxHeader, can_tx_data_buff) != HAL_OK) {
       return false;
   }
@@ -213,6 +287,14 @@ bool can_send(FDCAN_HandleTypeDef *hcan, struct gs_host_frame *frame)
   }
 }
 
+/**
+  * @brief  Rx FIFO 0 callback.
+  * @param  hfdcan pointer to an FDCAN_HandleTypeDef structure that contains
+  *         the configuration information for the specified FDCAN.
+  * @param  RxFifo0ITs indicates which Rx FIFO 0 interrupts are signalled.
+  *         This parameter can be any combination of @arg FDCAN_Rx_Fifo0_Interrupts.
+  * @retval None
+  */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
   FDCAN_RxHeaderTypeDef RxHeader;
   struct gs_host_frame frame;
@@ -251,9 +333,19 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
   }
 
   /* put this CAN message into the queue to send to host */
-  osMessageQueuePut(queue_to_hostHandle, &frame, 0, 0);
+  xQueueSendToBackFromISR(queue_to_hostHandle, &frame, NULL);
+  /* blink LED to indicate a CAN RX */
+  led_indicate_rxtx(&hled2);
 }
 
+/**
+  * @brief  Error status callback.
+  * @param  hfdcan pointer to an FDCAN_HandleTypeDef structure that contains
+  *         the configuration information for the specified FDCAN.
+  * @param  ErrorStatusITs indicates which Error Status interrupts are signaled.
+  *         This parameter can be any combination of @arg FDCAN_Error_Status_Interrupts.
+  * @retval None
+  */
 void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorStatusITs)
 {
   FDCAN_ProtocolStatusTypeDef status;
@@ -265,9 +357,14 @@ void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorSt
   can_parse_error_status(&status, &frame);
 
   /* QueuePut will only grab the bytes that match the size defined at initialization */
-  osMessageQueuePut(queue_to_hostHandle, &frame, 0, 0);
+  xQueueSendToBackFromISR(queue_to_hostHandle, &frame, NULL);
 }
 
+/** @brief Function parse the error data returned from the error callback
+ *  @param FDCAN_ProtocolStatusTypeDef *status - pointer to the status data
+ *  @param struct gs_host_frame *frame - The pointer to the host frame containing message data.
+ *  @retval None
+ */
 static void can_parse_error_status(FDCAN_ProtocolStatusTypeDef *status, struct gs_host_frame *frame)
 {
   frame->echo_id = 0xFFFFFFFF;
