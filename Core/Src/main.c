@@ -37,7 +37,8 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define IS_IRQ_MODE()             ( (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk) != 0)
-
+#define SYSMEM_RESET_VECTOR            0x1FF09800
+#define RESET_TO_BOOTLOADER_MAGIC_CODE 0xDEADBEEF
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -90,6 +91,8 @@ LED_HandleTypeDef hled1;
 LED_HandleTypeDef hled2;
 LED_HandleTypeDef hled3;
 
+uint32_t dfu_reset_to_bootloader_magic;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -103,6 +106,7 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void task_main(void *argument);
 static void task_serial_comm(void *argument);
+static void dfu_run_bootloader(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -565,6 +569,10 @@ void task_main(void *argument)
       }
     }
 
+    if (USBD_GS_CAN_DfuDetachRequested(&hUSB)) {
+      dfu_run_bootloader();
+    }
+
     led_update(&hled1);
     led_update(&hled2);
     led_update(&hled3);
@@ -628,6 +636,30 @@ int __io_putchar(int ch)
   }
 
   return ch;
+}
+
+void __initialize_hardware_early(void)
+{
+	void (*bootloader)(void);
+	volatile uint32_t addr = SYSMEM_RESET_VECTOR;
+
+	if (dfu_reset_to_bootloader_magic == RESET_TO_BOOTLOADER_MAGIC_CODE) {
+
+    bootloader = (void (*)(void)) (*((uint32_t *)(addr + 4)));
+    dfu_reset_to_bootloader_magic = 0;
+    __set_MSP(*(uint32_t *)addr);
+    bootloader();
+    while (42);
+  }
+  else {
+    /* Do nothing - fall through and continue normal init */
+  }
+}
+
+void dfu_run_bootloader(void)
+{
+  dfu_reset_to_bootloader_magic = RESET_TO_BOOTLOADER_MAGIC_CODE;
+  NVIC_SystemReset();
 }
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
